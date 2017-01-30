@@ -30,6 +30,71 @@ import MySQLdb
 # local application/library specific imports
 
 
+"""
+[db]
+host=10.0.19.61
+name=mailserver
+user=mailuser
+passwd=Pa$sw0rd
+"""
+config = ConfigParser.ConfigParser()
+config.read('configuration.ini')
+
+db_host = config.get('db', 'host')
+db_name = config.get('db', 'name')
+db_user = config.get('db', 'user')
+db_passwd = config.get('db', 'passwd')
+
+
+def connect(thread_index): 
+    # Create a connection and store it in the current thread 
+    cherrypy.thread_data.db = DB(db_host, db_port, db_user, db_pass, db_name)
+
+
+# Tell CherryPy to call "connect" for each thread, when it starts up 
+cherrypy.engine.subscribe('start_thread', connect)
+
+
+class DB:
+
+    def __init__(self, host, port, username, password, db_name):
+        self._host = host
+        self._port = port
+        self._username = username
+        self._password = password
+        self._db_name = db_name
+
+    def connect(self):
+        self._connection = MySQLdb.connect(
+            host = self._host,
+            port = self._port,
+            db = self._db_name,
+            user = self._username, passwd = self._password,
+            use_unicode=True, charset="utf8"
+        )
+        self._connection.ping(True)
+        self._cursor = self._connection.cursor()
+        self._d_cursor = self._connection.cursor(MySQLdb.cursors.DictCursor)
+
+    def _sql_execute(self, sql, values=None, as_dict=False):
+        if as_dict:
+            self._d_cursor.execute(sql, values)
+            return self._d_cursor
+        else:
+            self._cursor.execute(sql, values)
+            return self._cursor
+
+    def sql_execute(self, sql, values=None, as_dict=False):
+        try:
+            return self._sql_execute(sql, values, as_dict)
+        except (AttributeError, MySQLdb.OperationalError):
+            self.connect()
+            return self._sql_execute(sql, values, as_dict)
+
+    def commit(self):
+        self._connection.commit()
+
+
 class UCMS:
 
     __template_index = u"""
@@ -347,167 +412,130 @@ class UCMS:
             </tbody>
     """
 
-    def __init__(self):
-        """
-        [db]
-        host=10.0.19.61
-        name=mailserver
-        user=mailuser
-        passwd=Pa$sw0rd
-        """
-        config = ConfigParser.ConfigParser()
-        config.read('configuration.ini')
-
-        self._db_host = config.get('db', 'host')
-        self._db_name = config.get('db', 'name')
-        self._db_user = config.get('db', 'user')
-        self._db_passwd = config.get('db', 'passwd')
-        self._connect()
-
-    def _connect(self):
-        self._connection = MySQLdb.connect(
-            host = self._db_host,
-            db = self._db_name,
-            user = self._db_user, passwd = self._db_passwd,
-            use_unicode=True, charset="utf8"
-        )
-        self._connection.ping(True)
-        self._cursor = self._connection.cursor()
-        self._d_cursor = self._connection.cursor(MySQLdb.cursors.DictCursor)
-
-    def __sql_execute(self, sql, values=None, as_dict=False):
-        if as_dict:
-            return self._d_cursor.execute(sql, values)
-        else:
-            return self._cursor.execute(sql, values)
-
-    def _sql_execute(self, sql, values=None, as_dict=False):
-        try:
-            return self.__sql_execute(sql, values, as_dict)
-        except (AttributeError, MySQLdb.OperationalError):
-            self._connect()
-            return self.__sql_execute(sql, values, as_dict)
-
     def _add_customer(self, customer, password, email=''):
-        self._sql_execute("""INSERT INTO `customers`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `customers`
             (`username`, `password`, `email`)
         VALUES
             (%s, ENCRYPT(%s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))), %s)""", (customer, password, email)
         )
-        self._connection.commit()
+        cherrypy.thread_data.db.commit()
 
     def _auth_customer(self, customer, password):
-        self._sql_execute("""SELECT 1 FROM `customers` WHERE username = %s AND password = ENCRYPT(%s, `password`)""" ,(customer, password)
+        c = cherrypy.thread_data.db.sql_execute("""SELECT 1 FROM `customers` WHERE username = %s AND password = ENCRYPT(%s, `password`)""" ,(customer, password)
         )
-        return self._cursor.fetchone() is not None
+        return c.fetchone() is not None
 
     def _auth_admin(self, admin, password):
-        self._sql_execute("""SELECT 1 FROM `admins` WHERE username = %s AND password = ENCRYPT(%s, `password`)""" ,(admin, password)
+        c = cherrypy.thread_data.db.sql_execute("""SELECT 1 FROM `admins` WHERE username = %s AND password = ENCRYPT(%s, `password`)""" ,(admin, password)
         )
-        return self._cursor.fetchone() is not None
+        return c.fetchone() is not None
 
     def _add_admin(self, admin, password, email=''):
-        self._sql_execute("""INSERT INTO `admin`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `admin`
             (`username`, `password`, `email`)
         VALUES
             (%s, ENCRYPT(%s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))), %s)""", (admin, password, email)
         )
-        self._connection.commit()
+        cherrypy.thread_data.db.commit()
 
     def _update_customer(self, **kwargs):
         print """UPDATE customers SET email=%(email)s WHERE username=%(username)s""" % kwargs
-        self._sql_execute("""UPDATE customers SET email=%(email)s WHERE username=%(username)s""", kwargs)
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""UPDATE customers SET email=%(email)s WHERE username=%(username)s""", kwargs)
+        cherrypy.thread_data.db.commit()
 
     def _update_customer_password(self, **kwargs):
-        self._sql_execute("""UPDATE customers SET password=ENCRYPT(%(password)s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))) WHERE username=%(username)s""", kwargs)
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""UPDATE customers SET password=ENCRYPT(%(password)s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))) WHERE username=%(username)s""", kwargs)
+        cherrypy.thread_data.db.commit()
 
     def _get_customers(self):
-        self._sql_execute("""SELECT id, username, email FROM `customers`""" , None, as_dict=True)
+        c = cherrypy.thread_data.db.sql_execute("""SELECT id, username, email FROM `customers`""" , None, as_dict=True)
+        return c
 
     def _get_customer(self, username):
-        self._sql_execute("""SELECT id, username, email FROM `customers` WHERE username = %s""" , (username,) , as_dict=True)
-        return self._d_cursor.fetchone()
+        c = cherrypy.thread_data.db.sql_execute("""SELECT id, username, email FROM `customers` WHERE username = %s""" , (username,) , as_dict=True)
+        return c.fetchone()
 
     def _get_virtual_domains(self, username):
-        self._sql_execute("""SELECT vdid AS id, virtual_domains.name FROM `customers_virtual_domains` 
+        c = cherrypy.thread_data.db.sql_execute("""SELECT vdid AS id, virtual_domains.name FROM `customers_virtual_domains` 
         LEFT JOIN virtual_domains ON customers_virtual_domains.vdid = virtual_domains.id
         LEFT JOIN customers ON customers_virtual_domains.cid = customers.id
         WHERE customers.username = %s""" , (username,),
         as_dict=True)
+        return c
 
     def _get_virtual_domain(self, domain):
-        self._sql_execute("""SELECT vdid AS id, virtual_domains.name FROM `customers_virtual_domains` 
+        c = cherrypy.thread_data.db.sql_execute("""SELECT vdid AS id, virtual_domains.name FROM `customers_virtual_domains` 
         LEFT JOIN virtual_domains ON customers_virtual_domains.vdid = virtual_domains.id
         LEFT JOIN customers ON customers_virtual_domains.cid = customers.id
         WHERE virtual_domains.name = %s""" , (domain,),
         as_dict=True)
-        return self._d_cursor.fetchone()
+        return c.fetchone()
 
     def _get_virtual_users(self, vdid):
-        self._sql_execute("""SELECT id, email FROM virtual_users WHERE  domain_id = %s""", (vdid,), as_dict=True)
+        c = cherrypy.thread_data.db.sql_execute("""SELECT id, email FROM virtual_users WHERE  domain_id = %s""", (vdid,), as_dict=True)
+        return c
 
     def _get_virtual_user(self, email):
-        self._sql_execute("""SELECT id, email FROM virtual_users WHERE email = %s""", (email,), as_dict=True)
-        return self._d_cursor.fetchone()
+        c = cherrypy.thread_data.db.sql_execute("""SELECT id, email FROM virtual_users WHERE email = %s""", (email,), as_dict=True)
+        return c.fetchone()
 
     def _get_virtual_aliases(self, email):
         self._sql_execute("""SELECT virtual_aliases.id AS id, destination, email AS source FROM virtual_aliases 
         LEFT JOIN virtual_users ON virtual_aliases.vuid = virtual_users.id 
         WHERE virtual_users.email = %s""", (email,), as_dict=True)
+        return c
 
     def _add_virtual_domain(self, **kwargs):
-        self._sql_execute("""INSERT INTO `virtual_domains`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `virtual_domains`
             (`name`)
         VALUES
             (%(domain)s)""", kwargs
         )
-        self._sql_execute("""SELECT LAST_INSERT_ID();""")
-        row = self._cursor.fetchone()
+        c = cherrypy.thread_data.db.sql_execute("""SELECT LAST_INSERT_ID();""")
+        row = c.fetchone()
         kwargs['vdid'] = row[0]
-        self._sql_execute("""INSERT INTO `customers_virtual_domains`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `customers_virtual_domains`
             (`cid`, `vdid`)
         VALUES
             (%(cid)s, %(vdid)s)""", kwargs
         )
-        self._connection.commit()
+        cherrypy.thread_data.db.commit()
 
     def _add_virtual_user(self, **kwargs):
-        self._sql_execute("""INSERT INTO `virtual_users`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `virtual_users`
             (`domain_id`, `password` , `email`)
         VALUES
             (%(vdid)s, ENCRYPT(%(password)s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))), %(email)s)""", kwargs
         )
-        self._connection.commit()
+        cherrypy.thread_data.db.commit()
 
     def _update_virtual_user_password(self, **kwargs):
-        self._sql_execute("""UPDATE virtual_users SET password=ENCRYPT(%(password)s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))) WHERE email=%(email)s""", kwargs)
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""UPDATE virtual_users SET password=ENCRYPT(%(password)s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))) WHERE email=%(email)s""", kwargs)
+        cherrypy.thread_data.db.commit()
 
     def is_domain_owner(self, domain_name, username):
-        self._sql_execute("""SELECT 1 FROM customers_virtual_domains 
+        c = cherrypy.thread_data.db.sql_execute("""SELECT 1 FROM customers_virtual_domains 
         LEFT JOIN customers ON customers_virtual_domains.cid = customers.id 
         LEFT JOIN virtual_domains ON customers_virtual_domains.vdid = virtual_aliases.id 
         WHERE customer.username=%s AND virtual_domains.name = %s""" % (username, domain_name))
-        return self._cursor.fetchone() is not None
+        return c.fetchone() is not None
 
     def is_user_owner(self, email, username):
-        self._sql_execute("""SELECT 1 FROM virtual_users
+        c = cherrypy.thread_data.db.sql_execute("""SELECT 1 FROM virtual_users
         LEFT JOIN customers_virtual_domains ON customers_virtual_domains.id = virtual_users.domain_id
         LEFT JOIN customers ON customers_virtual_domains.cid = customers.id 
         LEFT JOIN virtual_domains ON customers_virtual_domains.vdid = virtual_aliases.id 
         WHERE customer.username=%s AND virtual_users.email = %s""" % (email, domain_name))
-        return self._cursor.fetchone() is not None
+        return c.fetchone() is not None
 
     def is_alias_owner(self, destination, username):
-        self._sql_execute("""SELECT 1 FROM 
+        c = cherrypy.thread_data.db.sql_execute("""SELECT 1 FROM 
         LEFT JOIN virtual_users ON virtual_users.id = virtual_aliases.vuid
         LEFT JOIN customers_virtual_domains ON customers_virtual_domains.id = virtual_users.domain_id
         LEFT JOIN customers ON customers_virtual_domains.cid = customers.id 
         LEFT JOIN virtual_domains ON customers_virtual_domains.vdid = virtual_aliases.id 
         WHERE customer.username=%s AND virtual_users.email = %s""" % (email, domain_name))
-        return self._cursor.fetchone() is not None
+        return c.fetchone() is not None
 
     def _build_top_menu(self, params):
         url = '/'
@@ -520,28 +548,28 @@ class UCMS:
         return u'»'.join(html)
 
     def _delete_customer(self, customer_name):
-        self._sql_execute("""DELETE FROM customers WHERE username=%s""", (customer_name,))
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""DELETE FROM customers WHERE username=%s""", (customer_name,))
+        cherrypy.thread_data.db.commit()
 
     def _delete_virtual_domain(self, domain_name):
-        self._sql_execute("""DELETE FROM virtual_domains WHERE name=%s""", (domain_name,))
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""DELETE FROM virtual_domains WHERE name=%s""", (domain_name,))
+        cherrypy.thread_data.db.commit()
 
     def _delete_virtual_user(self, username):
-        self._sql_execute("""DELETE FROM virtual_users WHERE email=%s""", (username,))
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""DELETE FROM virtual_users WHERE email=%s""", (username,))
+        cherrypy.thread_data.db.commit()
 
     def _delete_virtual_alias(self, destination):
-        self._sql_execute("""DELETE FROM virtual_alias WHERE destination=%s""", (destination,))
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""DELETE FROM virtual_alias WHERE destination=%s""", (destination,))
+        cherrypy.thread_data.db.commit()
 
     def _add_virtual_alias(self, **kwargs):
-        self._sql_execute("""INSERT INTO `virtual_aliases`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `virtual_aliases`
             (`domain_id`, vuid, `destination`)
         VALUES
             (%(vdid)s, %(vuid)s, %(destination)s);""", kwargs
         )
-        self._connection.commit()
+        cherrypy.thread_data.db.commit()
 
     def _get_menu_html(self, customer_menu=False):
         html = u""
@@ -555,9 +583,9 @@ class UCMS:
 
     def _get_virtual_users_table_html(self, customer, domain, vdid):
         tbody = ''
-        self._get_virtual_users(vdid)
+        c = self._get_virtual_users(vdid)
         while True:
-            virtual_user = self._d_cursor.fetchone()
+            virtual_user = c.fetchone()
             if virtual_user is None:
                 break;
             virtual_user['customer'] = customer
@@ -568,9 +596,9 @@ class UCMS:
 
     def _get_virtual_aliases_table_html(self, customer, domain, email):
         tbody = ''
-        self._get_virtual_aliases(email)
+        c = self._get_virtual_aliases(email)
         while True:
-            virtual_alias = self._d_cursor.fetchone()
+            virtual_alias = c.fetchone()
             if virtual_alias is None:
                 break;
             virtual_alias['customer'] = customer
@@ -581,9 +609,9 @@ class UCMS:
 
     def _get_customers_table_html(self):
         tbody = ''
-        self._get_customers()
+        c = self._get_customers()
         while True:
-            customer = self._d_cursor.fetchone()
+            customer = c.fetchone()
             if customer is None:
                 break;
             tbody += self.__template_customers_table_entry % customer
