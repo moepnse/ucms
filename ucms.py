@@ -21,6 +21,7 @@ import datetime
 import hashlib
 import binascii
 import ConfigParser
+from functools import wraps
 
 # related third party imports
 #import PIL.Image
@@ -28,6 +29,92 @@ import cherrypy
 import MySQLdb
 
 # local application/library specific imports
+
+
+"""
+[db]
+host=10.0.19.61
+name=mailserver
+user=mailuser
+passwd=Pa$sw0rd
+"""
+config = ConfigParser.ConfigParser({'port': '3306'})
+config.read('configuration.ini')
+
+db_host = config.get('db', 'host')
+db_port = int(config.get('db', 'port'))
+db_name = config.get('db', 'name')
+db_user = config.get('db', 'user')
+db_passwd = config.get('db', 'passwd')
+
+
+def connect(thread_index): 
+    # Create a connection and store it in the current thread 
+    cherrypy.thread_data.db = DB(db_host, db_port, db_user, db_passwd, db_name)
+
+
+# Tell CherryPy to call "connect" for each thread, when it starts up 
+cherrypy.engine.subscribe('start_thread', connect)
+
+
+#def authorize(admin=False, debug=False):
+#    if 'username' not in cherrypy.session or (admin and not cherrypy.session.get('is_admin', False)):
+#        raise cherrypy.HTTPRedirect("/")
+
+
+#cherrypy.tools.authorize = cherrypy.Tool("before_handler", authorize, priority=59)
+
+
+def authorize(admin=False, admin_or_owner=False):
+    def __decorator(func):
+        @wraps(func)
+        def __wrapper(*args, **kwargs):
+            if 'username' not in cherrypy.session or ((admin and not cherrypy.session.get('is_admin', False)) or (admin_or_owner and (args[1] != cherrypy.session['username'] and not cherrypy.session.get('is_admin', False)))):
+                raise cherrypy.HTTPRedirect("/")
+            return func(*args, **kwargs)
+        return __wrapper
+    return __decorator
+
+
+
+class DB:
+
+    def __init__(self, host, port, username, password, db_name):
+        self._host = host
+        self._port = port
+        self._username = username
+        self._password = password
+        self._db_name = db_name
+
+    def connect(self):
+        self._connection = MySQLdb.connect(
+            host = self._host,
+            port = self._port,
+            db = self._db_name,
+            user = self._username, passwd = self._password,
+            use_unicode=True, charset="utf8"
+        )
+        self._connection.ping(True)
+        self._cursor = self._connection.cursor()
+        self._d_cursor = self._connection.cursor(MySQLdb.cursors.DictCursor)
+
+    def _sql_execute(self, sql, values=None, as_dict=False):
+        if as_dict:
+            self._d_cursor.execute(sql, values)
+            return self._d_cursor
+        else:
+            self._cursor.execute(sql, values)
+            return self._cursor
+
+    def sql_execute(self, sql, values=None, as_dict=False):
+        try:
+            return self._sql_execute(sql, values, as_dict)
+        except (AttributeError, MySQLdb.OperationalError):
+            self.connect()
+            return self._sql_execute(sql, values, as_dict)
+
+    def commit(self):
+        self._connection.commit()
 
 
 class UCMS:
@@ -59,6 +146,10 @@ class UCMS:
     __template_customer_menu_entrys = u"""
         <a href="/users/" target="">Users</a>
         <a href="/domains/" target="">Domains</a>"""
+
+    __template_customer_menu_entrys__admin_view = u"""
+        <a href="/customer/%(customer)s/users/" target="">Users</a>
+        <a href="/customer/%(customer)s/domains/" target="">Domains</a>"""
 
     __template_menu = u"""
     <div id="menu">
@@ -347,167 +438,130 @@ class UCMS:
             </tbody>
     """
 
-    def __init__(self):
-        """
-        [db]
-        host=10.0.19.61
-        name=mailserver
-        user=mailuser
-        passwd=Pa$sw0rd
-        """
-        config = ConfigParser.ConfigParser()
-        config.read('configuration.ini')
-
-        self._db_host = config.get('db', 'host')
-        self._db_name = config.get('db', 'name')
-        self._db_user = config.get('db', 'user')
-        self._db_passwd = config.get('db', 'passwd')
-        self._connect()
-
-    def _connect(self):
-        self._connection = MySQLdb.connect(
-            host = self._db_host,
-            db = self._db_name,
-            user = self._db_user, passwd = self._db_passwd,
-            use_unicode=True, charset="utf8"
-        )
-        self._connection.ping(True)
-        self._cursor = self._connection.cursor()
-        self._d_cursor = self._connection.cursor(MySQLdb.cursors.DictCursor)
-
-    def __sql_execute(self, sql, values=None, as_dict=False):
-        if as_dict:
-            return self._d_cursor.execute(sql, values)
-        else:
-            return self._cursor.execute(sql, values)
-
-    def _sql_execute(self, sql, values=None, as_dict=False):
-        try:
-            return self.__sql_execute(sql, values, as_dict)
-        except (AttributeError, MySQLdb.OperationalError):
-            self._connect()
-            return self.__sql_execute(sql, values, as_dict)
-
     def _add_customer(self, customer, password, email=''):
-        self._sql_execute("""INSERT INTO `customers`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `customers`
             (`username`, `password`, `email`)
         VALUES
             (%s, ENCRYPT(%s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))), %s)""", (customer, password, email)
         )
-        self._connection.commit()
+        cherrypy.thread_data.db.commit()
 
     def _auth_customer(self, customer, password):
-        self._sql_execute("""SELECT 1 FROM `customers` WHERE username = %s AND password = ENCRYPT(%s, `password`)""" ,(customer, password)
+        c = cherrypy.thread_data.db.sql_execute("""SELECT 1 FROM `customers` WHERE username = %s AND password = ENCRYPT(%s, `password`)""" ,(customer, password)
         )
-        return self._cursor.fetchone() is not None
+        return c.fetchone() is not None
 
     def _auth_admin(self, admin, password):
-        self._sql_execute("""SELECT 1 FROM `admins` WHERE username = %s AND password = ENCRYPT(%s, `password`)""" ,(admin, password)
+        c = cherrypy.thread_data.db.sql_execute("""SELECT 1 FROM `admins` WHERE username = %s AND password = ENCRYPT(%s, `password`)""" ,(admin, password)
         )
-        return self._cursor.fetchone() is not None
+        return c.fetchone() is not None
 
     def _add_admin(self, admin, password, email=''):
-        self._sql_execute("""INSERT INTO `admin`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `admin`
             (`username`, `password`, `email`)
         VALUES
             (%s, ENCRYPT(%s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))), %s)""", (admin, password, email)
         )
-        self._connection.commit()
+        cherrypy.thread_data.db.commit()
 
     def _update_customer(self, **kwargs):
         print """UPDATE customers SET email=%(email)s WHERE username=%(username)s""" % kwargs
-        self._sql_execute("""UPDATE customers SET email=%(email)s WHERE username=%(username)s""", kwargs)
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""UPDATE customers SET email=%(email)s WHERE username=%(username)s""", kwargs)
+        cherrypy.thread_data.db.commit()
 
     def _update_customer_password(self, **kwargs):
-        self._sql_execute("""UPDATE customers SET password=ENCRYPT(%(password)s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))) WHERE username=%(username)s""", kwargs)
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""UPDATE customers SET password=ENCRYPT(%(password)s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))) WHERE username=%(username)s""", kwargs)
+        cherrypy.thread_data.db.commit()
 
     def _get_customers(self):
-        self._sql_execute("""SELECT id, username, email FROM `customers`""" , None, as_dict=True)
+        c = cherrypy.thread_data.db.sql_execute("""SELECT id, username, email FROM `customers`""" , None, as_dict=True)
+        return c
 
     def _get_customer(self, username):
-        self._sql_execute("""SELECT id, username, email FROM `customers` WHERE username = %s""" , (username,) , as_dict=True)
-        return self._d_cursor.fetchone()
+        c = cherrypy.thread_data.db.sql_execute("""SELECT id, username, email FROM `customers` WHERE username = %s""" , (username,) , as_dict=True)
+        return c.fetchone()
 
     def _get_virtual_domains(self, username):
-        self._sql_execute("""SELECT vdid AS id, virtual_domains.name FROM `customers_virtual_domains` 
+        c = cherrypy.thread_data.db.sql_execute("""SELECT vdid AS id, virtual_domains.name FROM `customers_virtual_domains` 
         LEFT JOIN virtual_domains ON customers_virtual_domains.vdid = virtual_domains.id
         LEFT JOIN customers ON customers_virtual_domains.cid = customers.id
         WHERE customers.username = %s""" , (username,),
         as_dict=True)
+        return c
 
     def _get_virtual_domain(self, domain):
-        self._sql_execute("""SELECT vdid AS id, virtual_domains.name FROM `customers_virtual_domains` 
+        c = cherrypy.thread_data.db.sql_execute("""SELECT vdid AS id, virtual_domains.name FROM `customers_virtual_domains` 
         LEFT JOIN virtual_domains ON customers_virtual_domains.vdid = virtual_domains.id
         LEFT JOIN customers ON customers_virtual_domains.cid = customers.id
         WHERE virtual_domains.name = %s""" , (domain,),
         as_dict=True)
-        return self._d_cursor.fetchone()
+        return c.fetchone()
 
     def _get_virtual_users(self, vdid):
-        self._sql_execute("""SELECT id, email FROM virtual_users WHERE  domain_id = %s""", (vdid,), as_dict=True)
+        c = cherrypy.thread_data.db.sql_execute("""SELECT id, email FROM virtual_users WHERE  domain_id = %s""", (vdid,), as_dict=True)
+        return c
 
     def _get_virtual_user(self, email):
-        self._sql_execute("""SELECT id, email FROM virtual_users WHERE email = %s""", (email,), as_dict=True)
-        return self._d_cursor.fetchone()
+        c = cherrypy.thread_data.db.sql_execute("""SELECT id, email FROM virtual_users WHERE email = %s""", (email,), as_dict=True)
+        return c.fetchone()
 
     def _get_virtual_aliases(self, email):
-        self._sql_execute("""SELECT virtual_aliases.id AS id, destination, email AS source FROM virtual_aliases 
+        c = cherrypy.thread_data.db.sql_execute("""SELECT virtual_aliases.id AS id, destination, email AS source FROM virtual_aliases 
         LEFT JOIN virtual_users ON virtual_aliases.vuid = virtual_users.id 
         WHERE virtual_users.email = %s""", (email,), as_dict=True)
+        return c
 
     def _add_virtual_domain(self, **kwargs):
-        self._sql_execute("""INSERT INTO `virtual_domains`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `virtual_domains`
             (`name`)
         VALUES
             (%(domain)s)""", kwargs
         )
-        self._sql_execute("""SELECT LAST_INSERT_ID();""")
-        row = self._cursor.fetchone()
+        c = cherrypy.thread_data.db.sql_execute("""SELECT LAST_INSERT_ID();""")
+        row = c.fetchone()
         kwargs['vdid'] = row[0]
-        self._sql_execute("""INSERT INTO `customers_virtual_domains`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `customers_virtual_domains`
             (`cid`, `vdid`)
         VALUES
             (%(cid)s, %(vdid)s)""", kwargs
         )
-        self._connection.commit()
+        cherrypy.thread_data.db.commit()
 
     def _add_virtual_user(self, **kwargs):
-        self._sql_execute("""INSERT INTO `virtual_users`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `virtual_users`
             (`domain_id`, `password` , `email`)
         VALUES
             (%(vdid)s, ENCRYPT(%(password)s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))), %(email)s)""", kwargs
         )
-        self._connection.commit()
+        cherrypy.thread_data.db.commit()
 
     def _update_virtual_user_password(self, **kwargs):
-        self._sql_execute("""UPDATE virtual_users SET password=ENCRYPT(%(password)s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))) WHERE email=%(email)s""", kwargs)
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""UPDATE virtual_users SET password=ENCRYPT(%(password)s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))) WHERE email=%(email)s""", kwargs)
+        cherrypy.thread_data.db.commit()
 
     def is_domain_owner(self, domain_name, username):
-        self._sql_execute("""SELECT 1 FROM customers_virtual_domains 
+        c = cherrypy.thread_data.db.sql_execute("""SELECT 1 FROM customers_virtual_domains 
         LEFT JOIN customers ON customers_virtual_domains.cid = customers.id 
         LEFT JOIN virtual_domains ON customers_virtual_domains.vdid = virtual_aliases.id 
         WHERE customer.username=%s AND virtual_domains.name = %s""" % (username, domain_name))
-        return self._cursor.fetchone() is not None
+        return c.fetchone() is not None
 
     def is_user_owner(self, email, username):
-        self._sql_execute("""SELECT 1 FROM virtual_users
+        c = cherrypy.thread_data.db.sql_execute("""SELECT 1 FROM virtual_users
         LEFT JOIN customers_virtual_domains ON customers_virtual_domains.id = virtual_users.domain_id
         LEFT JOIN customers ON customers_virtual_domains.cid = customers.id 
         LEFT JOIN virtual_domains ON customers_virtual_domains.vdid = virtual_aliases.id 
         WHERE customer.username=%s AND virtual_users.email = %s""" % (email, domain_name))
-        return self._cursor.fetchone() is not None
+        return c.fetchone() is not None
 
     def is_alias_owner(self, destination, username):
-        self._sql_execute("""SELECT 1 FROM 
+        c = cherrypy.thread_data.db.sql_execute("""SELECT 1 FROM 
         LEFT JOIN virtual_users ON virtual_users.id = virtual_aliases.vuid
         LEFT JOIN customers_virtual_domains ON customers_virtual_domains.id = virtual_users.domain_id
         LEFT JOIN customers ON customers_virtual_domains.cid = customers.id 
         LEFT JOIN virtual_domains ON customers_virtual_domains.vdid = virtual_aliases.id 
         WHERE customer.username=%s AND virtual_users.email = %s""" % (email, domain_name))
-        return self._cursor.fetchone() is not None
+        return c.fetchone() is not None
 
     def _build_top_menu(self, params):
         url = '/'
@@ -520,44 +574,47 @@ class UCMS:
         return u'»'.join(html)
 
     def _delete_customer(self, customer_name):
-        self._sql_execute("""DELETE FROM customers WHERE username=%s""", (customer_name,))
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""DELETE FROM customers WHERE username=%s""", (customer_name,))
+        cherrypy.thread_data.db.commit()
 
     def _delete_virtual_domain(self, domain_name):
-        self._sql_execute("""DELETE FROM virtual_domains WHERE name=%s""", (domain_name,))
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""DELETE FROM virtual_domains WHERE name=%s""", (domain_name,))
+        cherrypy.thread_data.db.commit()
 
     def _delete_virtual_user(self, username):
-        self._sql_execute("""DELETE FROM virtual_users WHERE email=%s""", (username,))
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""DELETE FROM virtual_users WHERE email=%s""", (username,))
+        cherrypy.thread_data.db.commit()
 
     def _delete_virtual_alias(self, destination):
-        self._sql_execute("""DELETE FROM virtual_alias WHERE destination=%s""", (destination,))
-        self._connection.commit()
+        c = cherrypy.thread_data.db.sql_execute("""DELETE FROM virtual_alias WHERE destination=%s""", (destination,))
+        cherrypy.thread_data.db.commit()
 
     def _add_virtual_alias(self, **kwargs):
-        self._sql_execute("""INSERT INTO `virtual_aliases`
+        c = cherrypy.thread_data.db.sql_execute("""INSERT INTO `virtual_aliases`
             (`domain_id`, vuid, `destination`)
         VALUES
             (%(vdid)s, %(vuid)s, %(destination)s);""", kwargs
         )
-        self._connection.commit()
+        cherrypy.thread_data.db.commit()
 
-    def _get_menu_html(self, customer_menu=False):
+    def _get_menu_html(self, customer_menu=False, customer=None):
         html = u""
         if cherrypy.session.get("is_admin", False):
             html = self.__template_admin_menu_entrys
         if customer_menu:
-            html += self.__template_customer_menu_entrys
+            if cherrypy.session.get('is_admin', False):
+                html += self.__template_customer_menu_entrys__admin_view % {'customer': customer}
+            else:
+                 html += self.__template_customer_menu_entrys
         return self.__template_menu % {
             "menu_entrys": html
         }
 
     def _get_virtual_users_table_html(self, customer, domain, vdid):
         tbody = ''
-        self._get_virtual_users(vdid)
+        c = self._get_virtual_users(vdid)
         while True:
-            virtual_user = self._d_cursor.fetchone()
+            virtual_user = c.fetchone()
             if virtual_user is None:
                 break;
             virtual_user['customer'] = customer
@@ -568,9 +625,9 @@ class UCMS:
 
     def _get_virtual_aliases_table_html(self, customer, domain, email):
         tbody = ''
-        self._get_virtual_aliases(email)
+        c = self._get_virtual_aliases(email)
         while True:
-            virtual_alias = self._d_cursor.fetchone()
+            virtual_alias = c.fetchone()
             if virtual_alias is None:
                 break;
             virtual_alias['customer'] = customer
@@ -581,9 +638,9 @@ class UCMS:
 
     def _get_customers_table_html(self):
         tbody = ''
-        self._get_customers()
+        c = self._get_customers()
         while True:
-            customer = self._d_cursor.fetchone()
+            customer = c.fetchone()
             if customer is None:
                 break;
             tbody += self.__template_customers_table_entry % customer
@@ -591,14 +648,20 @@ class UCMS:
         return self.__template_customers_table % {'tbody': tbody}
 
     @cherrypy.expose
+    #@cherrypy.tools.authorize()
+    @authorize()
     def users(self, param1=None, param2=None, param3=None, param4=None, **kwargs):
-        return self.customer(cherrypy.session.get('username', None), param1, param2, param3, param4, **kwargs)
+        return self.customer(cherrypy.session.get('username', None), "users", param1, param2, param3, param4, **kwargs)
 
     @cherrypy.expose
+    #@cherrypy.tools.authorize()
+    @authorize()
     def domains(self, param1=None, param2=None, param3=None, param4=None, **kwargs):
         return self.customer(cherrypy.session.get('username', None), 'domains', param1, param2, param3, param4, **kwargs)
 
     @cherrypy.expose
+    #@cherrypy.tools.authorize(admin=True)
+    @authorize(admin=True)
     def customers(self, param1=None, param2=None, param3=None, **kwargs):
         err_msg = ''
         html = ''
@@ -634,6 +697,8 @@ class UCMS:
         }
 
     @cherrypy.expose
+    #@cherrypy.tools.authorize(admin=True)
+    @authorize(admin_or_owner=True)
     def customer(self, param1=None, param2=None, param3=None, param4=None, param5=None, param6=None, **kwargs):
         top_menu = u''
         err_msg = u''
@@ -673,7 +738,7 @@ class UCMS:
                         'target': "/customer/%(customer)s/" % {'customer': customer_name},
                         'text': 'Do you really want to delete this customer?'
                     }
-                    return self._build(html, top_menu, param1 is not None)
+                    return self._build(html, top_menu, True, customer=customer_name)
                 elif param2 == "add":
                     kwargs['username'] = customer_name
                     kwargs['cid'] = customer['id']
@@ -703,7 +768,7 @@ class UCMS:
                              },
                             'text': 'Do you really want to delete this virtual user?'
                         }
-                        return self._build(html, top_menu, param1 is not None)
+                        return self._build(html, top_menu, True, customer=customer_name)
                     if param3 == "user":
                         if cherrypy.request.method == 'POST':
                             if "yes" in kwargs:
@@ -716,7 +781,7 @@ class UCMS:
                             },
                             'text': 'Do you really want to delete this virtual user?'
                         }
-                        return self._build(html, top_menu, param1 is not None)
+                        return self._build(html, top_menu, True, customer=customer_name)
                     elif param3 == "alias":
                         if cherrypy.request.method == 'POST':
                             if "yes" in kwargs:
@@ -729,7 +794,7 @@ class UCMS:
                              },
                             'text': 'Do you really want to delete this virtual alias?'
                         }
-                        return self._build(html, top_menu, param1 is not None)
+                        return self._build(html, top_menu, True, customer=customer_name)
 
                 elif param2 in ("virtual_user", "virtual_users", "user", "users"):
                     if param4 == "change" and param5 == "pw":
@@ -739,6 +804,9 @@ class UCMS:
                             password_class = 'error'
                         else:
                             self._update_virtual_user_password(**kwargs)
+                    else:
+                        html = self._get_complete_users_table_html(username)
+                        return self._build(html, top_menu, True, customer=customer_name)
                 elif param2 in ("virtual_domain", "virtual_domains", "domain", "domains"):
                     if param3 == "delete":
                         if cherrypy.request.method == 'POST':
@@ -748,7 +816,7 @@ class UCMS:
                             'target': "/".join((param1, param2, param3, param4)),
                             'text': 'Do you really want to delete this virtual domain?'
                         }
-                        return self._build(html, top_menu, param1 is not None)
+                        return self._build(html, top_menu, True, customer=customer_name)
                     elif param3 is not None:
                         domain_name = param3
                         if param4 == "delete":
@@ -760,7 +828,7 @@ class UCMS:
                                 'target': "/customer/" + "/".join(param1, param2, param3, param4),
                                 'text': 'Do you really want to delete this virtual user?'
                             }
-                            return self._build(html, top_menu, param1 is not None)
+                            return self._build(html, top_menu, True, customer=customer_name)
                         elif param4 is not None:
                             virtual_user_name = param4
                             if param5 == "delete":
@@ -772,7 +840,7 @@ class UCMS:
                                     'target': "/customer/" + "/".join((param1, param2, param3, param4)),
                                     'text': 'Do you really want to delete this virtual user?'
                                 }
-                                return self._build(html, top_menu, param1 is not None)
+                                return self._build(html, top_menu, True, customer=customer_name)
                             if param6 == "delete":
                                 if cherrypy.request.method == 'POST':
                                     self._delete_virtual_alias(param5)
@@ -781,7 +849,7 @@ class UCMS:
                                     'target': "/customer/" + "/".join((param1, param2, param3, param4, param5, param6)),
                                     'text': 'Do you really want to delete this virtual alias?'
                                 }
-                                return self._build(html, top_menu, param1 is not None)
+                                return self._build(html, top_menu, True, customer=customer_name)
                             html = self.__template_virtual_user_change_pw_form % {
                                 'username': param1, 
                                 'name': virtual_user_name,
@@ -794,7 +862,7 @@ class UCMS:
                                 'destination_class': destination_class
                             }
                             html += "<h1>Aliases</h1>" + self._get_virtual_aliases_table_html(customer_name, domain_name, virtual_user_name)
-                            return self._build(html, top_menu, param1 is not None)
+                            return self._build(html, top_menu, True, customer=customer_name)
                         else:
                             domain = self._get_virtual_domain(param3)
                             vdid = domain['id']
@@ -803,10 +871,10 @@ class UCMS:
                             domain['password_class'] = password_class
                             html = self.__template_customer_add_virtual_user_form % domain
                             html += "<h1>Users</h1>" + self._get_virtual_users_table_html(param1, param3, vdid)
-                            return self._build(html, top_menu, param1 is not None)
-                    else:
-                        html = self._build(self._get_virtual_domains_table_html(param1), top_menu, param1 is not None)
-                        return html
+                            return self._build(html, top_menu, True, customer=customer_name)
+                    #else:
+                    #    html = self._build(self.__template_customer_add_domain_form % customer, self._get_virtual_domains_table_html(param1), top_menu, True, customer=customer_name)
+                    #    return html
                 if err_msg == '' and param2 in ("add", "change"):
                     raise cherrypy.HTTPRedirect("/customer/%(username)s" % customer)
                 customer['email_class'] = email_class
@@ -817,12 +885,12 @@ class UCMS:
                     self.__template_customer_add_domain_form % customer, 
                     self._get_virtual_domains_table_html(param1))
 
-        return self._build(html, top_menu, param1 is not None)
+        return self._build(html, top_menu, param1 is not None, customer=customer_name)
 
-    def _build(self, html, top_menu='', customer_menu=False):
+    def _build(self, html, top_menu='', customer_menu=False, customer=None):
         return self.__template_index % {
             'html': self.__template_logged_in % {
-                'menu':  self._get_menu_html(customer_menu),
+                'menu':  self._get_menu_html(customer_menu, customer=customer),
                 'top_menu': top_menu, 
                 'html': html
                 }
@@ -830,9 +898,9 @@ class UCMS:
 
     def _get_virtual_domains_table_html(self, username):
         tbody = u''
-        self._get_virtual_domains(username)
+        c = self._get_virtual_domains(username)
         while True:
-            domain = self._d_cursor.fetchone()
+            domain = c.fetchone()
             if domain is None:
                 break;
             domain['customer'] = username
@@ -840,16 +908,18 @@ class UCMS:
 
         return self.__template_virtual_domains_table % {'tbody': tbody}
 
-    @cherrypy.expose
-    def virtual_domains(self, **kwargs):
-        html = self._get_virtual_domains_table_html(cherrypy.session['username'])
-        return self.__template_index % {
-            'html': self.__domain__template_logged_in % {
-                'top_menu': '',
-                'menu':  self._get_menu_html(), 
-                'html': html
+
+    def _get_complete_users_table_html(self, username):
+        c = self._get_virtual_domains(username)
+        domains = c.fetchall()
+        html = u""
+        for domain in domains:
+            html += u"""<h2><a href="/customer/%(username)s/domain/%(domain_name)s">%(domain_name)s</a></h2>""" % {
+                'username': username, 
+                'domain_name': domain['name']
             }
-        }
+            html += self._get_virtual_users_table_html(username, domain['name'], domain['id'])
+        return html
 
     @cherrypy.expose
     def index(self, **kwargs):
@@ -863,9 +933,9 @@ class UCMS:
                 cherrypy.session['username'] = username
                 raise cherrypy.HTTPRedirect("/" % kwargs)
         if 'username' in cherrypy.session:
-            html = self.__domain__template_logged_in % {
+            html = self.__template_logged_in % {
                 'top_menu': '',
-                'menu':  self._get_menu_html(),
+                'menu':  self._get_menu_html(not cherrypy.session.get('is_admin', False)),
                 'html': html
             }
         else:
@@ -908,20 +978,27 @@ class UCMS:
     @cherrypy.expose
     def logout(self, **kwargs):
         if 'username' in cherrypy.session:
-            del cherrypy.session['username']
+             cherrypy.session.clear()
         raise cherrypy.HTTPRedirect("/")
 
 
-cherrypy.tree.mount(UCMS())
-# CherryPy autoreload must be disabled for the flup server to work
 cherrypy.config.update(
     {
-        #'server.socket_port': 8080,
-        #'server.socket_host': '127.0.0.1',
-        'server.socket_file': "/tmp/ucms",
-        'engine.autoreload.on': True,
-        'tools.sessions.on': True,
-        'tools.sessions.storage_type': 'file',
-        'tools.sessions.storage_path': os.path.join(os.path.abspath(os.getcwd()), 'sessions'),
+            #'server.socket_port': 8080,
+            #'server.socket_host': '127.0.0.1',
+            'server.socket_file': "/tmp/ucms",
+            'engine.autoreload.on': True,
+            'log.access_file': './logs/access.log',
+            'log.error_file': './logs/error.log'
+    }
+)
+
+# CherryPy autoreload must be disabled for the flup server to work
+cherrypy.tree.mount(UCMS(), "/", config={
+    "/": {
+            'tools.sessions.on': True,
+            'tools.sessions.storage_type': 'file',
+            'tools.sessions.storage_path': os.path.join(os.path.abspath(os.getcwd()), 'sessions')
+        }
     }
 )
