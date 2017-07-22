@@ -38,11 +38,11 @@ name=mailserver
 user=mailuser
 passwd=Pa$sw0rd
 """
+
 config = ConfigParser.ConfigParser({'port': '3306'})
 config.read('configuration.ini')
 
 db_host = config.get('db', 'host')
-db_port = int(config.get('db', 'port'))
 db_name = config.get('db', 'name')
 db_user = config.get('db', 'user')
 db_passwd = config.get('db', 'passwd')
@@ -50,7 +50,7 @@ db_passwd = config.get('db', 'passwd')
 
 def connect(thread_index): 
     # Create a connection and store it in the current thread 
-    cherrypy.thread_data.db = DB(db_host, db_port, db_user, db_passwd, db_name)
+    cherrypy.thread_data.db = DB(db_host, db_port, db_user, db_pass, db_name)
 
 
 # Tell CherryPy to call "connect" for each thread, when it starts up 
@@ -74,7 +74,6 @@ def authorize(admin=False, admin_or_owner=False):
             return func(*args, **kwargs)
         return __wrapper
     return __decorator
-
 
 
 class DB:
