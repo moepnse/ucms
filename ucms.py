@@ -43,6 +43,7 @@ config = ConfigParser.ConfigParser({'port': '3306'})
 config.read('configuration.ini')
 
 db_host = config.get('db', 'host')
+db_port = config.get('db', 'port')
 db_name = config.get('db', 'name')
 db_user = config.get('db', 'user')
 db_passwd = config.get('db', 'passwd')
